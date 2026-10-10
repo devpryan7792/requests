@@ -1011,3 +1011,54 @@ def test_should_bypass_proxies_win_registry_ProxyOverride_value(monkeypatch):
     monkeypatch.setattr(winreg, "OpenKey", OpenKey)
     monkeypatch.setattr(winreg, "QueryValueEx", QueryValueEx)
     assert should_bypass_proxies("http://example.com/", None) is False
+
+
+def test_proxy_bypass_registry_anchored_matching(monkeypatch):
+    """Ensure proxy_bypass_registry anchors both ends and does not bypass
+    untrusted subdomains (Issue #7629).
+    """
+    import sys
+    import types
+
+    from requests.utils import proxy_bypass_registry
+
+    winreg_mock = types.ModuleType("winreg")
+    winreg_mock.HKEY_CURRENT_USER = 1
+
+    class RegHandle:
+        def Close(self):
+            pass
+
+    ie_settings = RegHandle()
+
+    def OpenKey(key, subkey):
+        return ie_settings
+
+    def QueryValueEx(key, value_name):
+        if key is ie_settings:
+            if value_name == "ProxyEnable":
+                return [1]
+            elif value_name == "ProxyOverride":
+                return [
+                    "google.com; *.example.net ; 192.168.1.1 ; <local> ; <-loopback> ; ; "
+                ]
+
+    winreg_mock.OpenKey = OpenKey
+    winreg_mock.QueryValueEx = QueryValueEx
+    monkeypatch.setitem(sys.modules, "winreg", winreg_mock)
+
+    # Valid matches
+    assert proxy_bypass_registry("google.com") is True
+    assert proxy_bypass_registry("GOOGLE.COM") is True
+    assert proxy_bypass_registry("sub.example.net") is True
+    assert proxy_bypass_registry("192.168.1.1") is True
+    assert proxy_bypass_registry("localhost") is True
+    assert proxy_bypass_registry("intranet") is True
+
+    # Untrusted hosts that start with the pattern MUST NOT bypass proxy
+    assert proxy_bypass_registry("google.com.evil.com") is False
+    assert proxy_bypass_registry("evil.google.com") is False
+    assert proxy_bypass_registry("sub.example.net.evil.com") is False
+    assert proxy_bypass_registry("192.168.1.100") is False
+    assert proxy_bypass_registry("internal.corp") is False
+    assert proxy_bypass_registry("127.0.0.1") is False
